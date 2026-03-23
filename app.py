@@ -20,14 +20,10 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
-from io import BytesIO
 
 import anthropic
-from pptx import Presentation
-from pptx.util import Inches, Pt
-from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
 
+from pptx_export import build_presentation
 from variance_engine import (
     validate_csv,
     compute_variances,
@@ -335,230 +331,7 @@ def _kpi_card(label: str, value: str, css_class: str = "", subtitle: str = "") -
 
 
 # generate_commentary and answer_question are imported from commentary.py
-
-
-# ── PowerPoint export ─────────────────────────────────────────────────────────
-
-def _rgb(hex_color: str) -> RGBColor:
-    """Convert a CSS hex string to a python-pptx RGBColor."""
-    h = hex_color.lstrip("#")
-    return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
-
-
-def _add_text_box(
-    slide,
-    text: str,
-    left: float, top: float, width: float, height: float,
-    font_size: int = 12,
-    bold: bool = False,
-    color: RGBColor | None = None,
-    align=PP_ALIGN.LEFT,
-) -> None:
-    """Helper: add a formatted text box to *slide* using inch coordinates."""
-    color = color or _rgb("#1E293B")
-    txb = slide.shapes.add_textbox(
-        Inches(left), Inches(top), Inches(width), Inches(height)
-    )
-    tf = txb.text_frame
-    tf.word_wrap = True
-    para = tf.paragraphs[0]
-    para.text = text
-    para.alignment = align
-    run = para.runs[0]
-    run.font.size      = Pt(font_size)
-    run.font.bold      = bold
-    run.font.color.rgb = color
-    run.font.name      = "Calibri"
-
-
-def _chart_image(fig) -> BytesIO | None:
-    """
-    Convert a Plotly figure to a PNG BytesIO buffer via kaleido.
-
-    Returns None (graceful degradation) if kaleido is not installed,
-    so chart slides fall back to a text placeholder rather than crashing.
-    """
-    try:
-        raw = fig.to_image(format="png", width=1100, height=520, scale=2)
-        buf = BytesIO(raw)
-        buf.seek(0)
-        return buf
-    except Exception:
-        return None
-
-
-def build_pptx(
-    enriched_df: pd.DataFrame,
-    cat_df: pd.DataFrame,
-    waterfall_df: pd.DataFrame,
-    period: str,
-    commentary: str | None = None,
-) -> BytesIO:
-    """
-    Assemble a PowerPoint report and return it as a BytesIO buffer.
-
-    Slide structure
-    ---------------
-    1. Title slide  — period, headline metrics, byline
-    2. Waterfall    — budget-to-actual bridge chart image
-    3. By Category  — grouped bar chart image
-    4. Material variances table — formatted with alternating row shading
-    5. AI Commentary (only if *commentary* is provided)
-
-    Chart images require the ``kaleido`` package (``pip install kaleido``).
-    When kaleido is absent the image slides render a "install kaleido" notice
-    instead of crashing.  The table and commentary slides are unaffected.
-
-    Parameters
-    ----------
-    enriched_df  : output of compute_variances()
-    cat_df       : output of summarize_by_category()
-    waterfall_df : output of build_waterfall_data()
-    period       : reporting period string used in slide titles
-    commentary   : Claude commentary text, or None to omit the last slide
-    """
-    prs = Presentation()
-    prs.slide_width  = Inches(13.33)
-    prs.slide_height = Inches(7.5)
-    blank = prs.slide_layouts[6]   # fully blank layout
-
-    SLATE  = _rgb("#1E293B")
-    TEAL   = _rgb("#0D9488")
-    LIGHT  = _rgb("#F8FAFC")
-    MUTED  = _rgb("#94A3B8")
-    WHITE  = _rgb("#FFFFFF")
-
-    def _kaleido_notice(slide):
-        _add_text_box(
-            slide,
-            "Chart image requires kaleido  →  pip install kaleido",
-            0.4, 3.0, 12.5, 0.7,
-            font_size=11, color=MUTED, align=PP_ALIGN.CENTER,
-        )
-
-    # ── Slide 1: Title ────────────────────────────────────────────────────────
-    sl = prs.slides.add_slide(blank)
-    sl.background.fill.solid()
-    sl.background.fill.fore_color.rgb = _rgb("#0F172A")
-
-    # Teal accent bar at bottom
-    bar = sl.shapes.add_shape(1, Inches(0), Inches(6.85), Inches(13.33), Inches(0.65))
-    bar.fill.solid()
-    bar.fill.fore_color.rgb = TEAL
-    bar.line.fill.background()
-
-    _add_text_box(sl, "📊  FP&A Variance Copilot",
-                  0.6, 1.4, 12.0, 1.0, font_size=30, bold=True, color=_rgb("#F1F5F9"))
-    _add_text_box(sl, f"Variance Analysis Report  ·  {period}",
-                  0.6, 2.6, 10.0, 0.7, font_size=17, color=MUTED)
-
-    total_budget = enriched_df["Budget"].sum()
-    total_actual = enriched_df["Actual"].sum()
-    net_var      = total_actual - total_budget
-    _add_text_box(
-        sl,
-        f"Budget {_fmt_dollar(total_budget, compact=True)}   ·   "
-        f"Actual {_fmt_dollar(total_actual, compact=True)}   ·   "
-        f"Net Variance {_fmt_dollar(net_var, compact=True)}",
-        0.6, 3.5, 12.0, 0.6, font_size=13, color=_rgb("#CBD5E1"),
-    )
-    _add_text_box(sl, "Built by Priyanka Chandramohan",
-                  0.6, 7.0, 6.0, 0.35, font_size=9, color=_rgb("#475569"))
-
-    # ── Slide 2: Waterfall ────────────────────────────────────────────────────
-    sl = prs.slides.add_slide(blank)
-    _add_text_box(sl, f"Budget-to-Actual Bridge  ·  {period}",
-                  0.4, 0.2, 12.5, 0.55, font_size=14, bold=True, color=SLATE)
-    img = _chart_image(plot_waterfall(waterfall_df, title=""))
-    if img:
-        sl.shapes.add_picture(img, Inches(0.4), Inches(0.9), Inches(12.5), Inches(5.9))
-    else:
-        _kaleido_notice(sl)
-
-    # ── Slide 3: Budget vs Actual by Category ─────────────────────────────────
-    sl = prs.slides.add_slide(blank)
-    _add_text_box(sl, f"Budget vs. Actual by Category  ·  {period}",
-                  0.4, 0.2, 12.5, 0.55, font_size=14, bold=True, color=SLATE)
-    img = _chart_image(plot_budget_vs_actual(cat_df, title=""))
-    if img:
-        sl.shapes.add_picture(img, Inches(0.4), Inches(0.9), Inches(12.5), Inches(5.9))
-    else:
-        _kaleido_notice(sl)
-
-    # ── Slide 4: Material variances table ─────────────────────────────────────
-    sl = prs.slides.add_slide(blank)
-    _add_text_box(sl, f"Material Variances  ·  {period}",
-                  0.4, 0.2, 12.5, 0.55, font_size=14, bold=True, color=SLATE)
-
-    material = get_material_items(enriched_df)
-    tbl_cols  = ["Line Item", "Category", "Budget", "Actual", "Variance ($)", "Variance (%)", "Severity"]
-    tbl_data  = material[[c for c in tbl_cols if c in material.columns]]
-    n_rows    = len(tbl_data) + 1   # +1 for header
-
-    tbl = sl.shapes.add_table(
-        n_rows, len(tbl_cols),
-        Inches(0.4), Inches(0.9),
-        Inches(12.5), Inches(min(5.8, 0.38 * n_rows + 0.3)),
-    ).table
-
-    # Header
-    for ci, col_name in enumerate(tbl_cols):
-        cell = tbl.cell(0, ci)
-        cell.text = col_name
-        cell.fill.solid()
-        cell.fill.fore_color.rgb = SLATE
-        run = cell.text_frame.paragraphs[0].runs[0]
-        run.font.size = Pt(8); run.font.bold = True
-        run.font.color.rgb = WHITE; run.font.name = "Calibri"
-
-    # Data rows
-    for ri, (_, row) in enumerate(tbl_data.iterrows(), start=1):
-        for ci, col_name in enumerate(tbl_cols):
-            cell = tbl.cell(ri, ci)
-            val  = row[col_name]
-            if col_name in ("Budget", "Actual", "Variance ($)"):
-                cell.text = _fmt_dollar(val)
-            elif col_name == "Variance (%)":
-                cell.text = _fmt_pct(val)
-            else:
-                cell.text = str(val)
-            run = cell.text_frame.paragraphs[0].runs[0]
-            run.font.size = Pt(8); run.font.name = "Calibri"
-            run.font.color.rgb = SLATE
-            if ri % 2 == 0:
-                cell.fill.solid()
-                cell.fill.fore_color.rgb = _rgb("#F8FAFC")
-
-    # ── Slide 5: AI Commentary ────────────────────────────────────────────────
-    if commentary:
-        sl = prs.slides.add_slide(blank)
-        _add_text_box(sl, f"AI Commentary  ·  {period}",
-                      0.4, 0.2, 12.5, 0.55, font_size=14, bold=True, color=SLATE)
-        # Left teal accent bar
-        accent = sl.shapes.add_shape(
-            1, Inches(0.4), Inches(0.9), Inches(0.06), Inches(5.8)
-        )
-        accent.fill.solid(); accent.fill.fore_color.rgb = TEAL
-        accent.line.fill.background()
-
-        txb = sl.shapes.add_textbox(Inches(0.6), Inches(0.9), Inches(12.3), Inches(5.8))
-        tf  = txb.text_frame; tf.word_wrap = True
-        first = True
-        for para_text in commentary.split("\n"):
-            para_text = para_text.strip()
-            if not para_text:
-                continue
-            p = tf.paragraphs[0] if first else tf.add_paragraph()
-            first = False
-            p.text = para_text
-            run = p.runs[0]
-            run.font.size = Pt(10); run.font.name = "Calibri"
-            run.font.color.rgb = _rgb("#334155")
-
-    buf = BytesIO()
-    prs.save(buf)
-    buf.seek(0)
-    return buf
+# build_presentation is imported from pptx_export.py
 
 
 # ── State 1: Landing page ─────────────────────────────────────────────────────
@@ -906,6 +679,7 @@ def render_forward_look(
     # ── Compute projection ────────────────────────────────────────────────────
     proj_df = project_next_quarter(enriched_df, next_q_growth_pct=growth_pct)
     summary = summarize_projection(proj_df, period=period, next_q_label=next_q)
+    st.session_state["projection_df"] = proj_df
 
     # ── Projection table ──────────────────────────────────────────────────────
     material_proj = proj_df[proj_df["Material"]].copy()
@@ -1010,6 +784,7 @@ def render_forward_look(
         with st.spinner(f"Generating risk narrative for {next_q}…"):
             narrative = generate_risk_narrative(summary, api_key)
         if narrative:
+            st.session_state["risk_narrative"] = narrative
             safe = (
                 narrative
                 .replace("&", "&amp;")
@@ -1162,12 +937,14 @@ def main() -> None:
         cat_df       = summarize_by_category(enriched_df)
         waterfall_df = build_waterfall_data(enriched_df)
 
-        st.session_state["_file_key"]    = file_key
-        st.session_state["enriched_df"]  = enriched_df
-        st.session_state["cat_df"]       = cat_df
-        st.session_state["waterfall_df"] = waterfall_df
-        st.session_state["commentary"]   = None   # reset on new file / threshold change
-        st.session_state["chat_history"] = []     # reset conversation on new file
+        st.session_state["_file_key"]      = file_key
+        st.session_state["enriched_df"]    = enriched_df
+        st.session_state["cat_df"]         = cat_df
+        st.session_state["waterfall_df"]   = waterfall_df
+        st.session_state["commentary"]     = None   # reset on new file / threshold change
+        st.session_state["chat_history"]   = []     # reset conversation on new file
+        st.session_state["projection_df"]  = None
+        st.session_state["risk_narrative"] = None
 
     enriched_df  = st.session_state["enriched_df"]
     cat_df       = st.session_state["cat_df"]
@@ -1178,7 +955,7 @@ def main() -> None:
 
     # ── Action row ────────────────────────────────────────────────────────────
     st.markdown("---")
-    btn_col, dl_col, _ = st.columns([2, 2, 5], gap="small")
+    btn_col, _ = st.columns([2, 7], gap="small")
 
     with btn_col:
         # Show which tone will be used so users understand the button
@@ -1191,22 +968,6 @@ def main() -> None:
                 f"Generate {tone} commentary. "
                 "No API key? Click anyway for a rule-based version."
             ),
-        )
-
-    with dl_col:
-        pptx_buf = build_pptx(
-            enriched_df, cat_df, waterfall_df, period,
-            commentary=st.session_state.get("commentary"),
-        )
-        st.download_button(
-            label="📥 Download PowerPoint",
-            data=pptx_buf,
-            file_name=f"variance_report_{period.replace(' ', '_')}.pptx",
-            mime=(
-                "application/vnd.openxmlformats-officedocument"
-                ".presentationml.presentation"
-            ),
-            use_container_width=True,
         )
 
     # ── Commentary generation ─────────────────────────────────────────────────
@@ -1236,6 +997,32 @@ def main() -> None:
     # ── State 3: commentary + chat ────────────────────────────────────────────
     if st.session_state.get("commentary"):
         render_commentary(st.session_state["commentary"])
+
+        # Download button — only shown after commentary is generated
+        dl_col, _ = st.columns([2, 7], gap="small")
+        with dl_col:
+            pptx_buf = build_presentation(
+                enriched_df=enriched_df,
+                cat_df=cat_df,
+                waterfall_df=waterfall_df,
+                period=period,
+                tone=tone,
+                commentary=st.session_state.get("commentary"),
+                projection_df=st.session_state.get("projection_df"),
+                risk_narrative=st.session_state.get("risk_narrative"),
+            )
+            safe_period = period.replace(" ", "_")
+            st.download_button(
+                label="📥 Download PowerPoint",
+                data=pptx_buf,
+                file_name=f"FPA_Variance_Report_{safe_period}.pptx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument"
+                    ".presentationml.presentation"
+                ),
+                use_container_width=True,
+            )
+
         render_chat_interface(enriched_df, cat_df, period, api_key)
 
 

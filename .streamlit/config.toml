@@ -1,0 +1,18 @@
+[theme]
+# Slate/teal palette matching the app's CSS design
+primaryColor        = "#0D9488"   # teal-600  — buttons, active tabs, highlights
+backgroundColor     = "#FFFFFF"   # main content area
+secondaryBackgroundColor = "#F8FAFC"  # slate-50  — sidebar, code blocks, inputs
+textColor           = "#1E293B"   # slate-800 — primary text
+
+font = "sans serif"
+
+[server]
+# Prevent the browser from auto-opening on every run
+headless = false
+# Raise the upload limit to 50 MB (default is 200 MB but explicit is better)
+maxUploadSize = 50
+
+[browser]
+# Disable the Streamlit watermark in the corner (respects Streamlit's ToS)
+gatherUsageStats = false
