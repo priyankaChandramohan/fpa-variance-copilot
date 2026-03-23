@@ -1,0 +1,21 @@
+Line Item,Category,Budget,Actual,Period
+Professional Services Revenue,Revenue,4200000,4650000,Q4 2024
+Product License Revenue,Revenue,3800000,3310000,Q4 2024
+Maintenance & Support Revenue,Revenue,2100000,2190000,Q4 2024
+Other Income,Other Income,150000,162000,Q4 2024
+Cost of Services Delivered,Cost of Revenue,1680000,1755000,Q4 2024
+Cost of Goods Sold,Cost of Revenue,950000,862000,Q4 2024
+Third-Party Software & Licenses,Cost of Revenue,420000,398000,Q4 2024
+Salaries & Benefits - Engineering,R&D,2100000,2145000,Q4 2024
+Cloud Infrastructure & Hosting,R&D,480000,612000,Q4 2024
+Software Tools & Subscriptions,R&D,95000,88000,Q4 2024
+Salaries & Benefits - Sales,Sales & Marketing,1450000,1438000,Q4 2024
+Digital Marketing & Paid Acquisition,Sales & Marketing,620000,784000,Q4 2024
+Events & Trade Shows,Sales & Marketing,310000,174000,Q4 2024
+Channel Partner Commissions,Sales & Marketing,285000,302000,Q4 2024
+Salaries & Benefits - G&A,G&A,680000,695000,Q4 2024
+Legal & Compliance,G&A,145000,189000,Q4 2024
+Finance & Accounting,G&A,98000,101000,Q4 2024
+Contractor & Consulting Fees,G&A,340000,271000,Q4 2024
+Facilities & Office Costs,G&A,175000,168000,Q4 2024
+Depreciation & Amortization,G&A,210000,214000,Q4 2024
