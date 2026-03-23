@@ -41,7 +41,12 @@ from charts import (
     plot_severity_donut,
     plot_projection,
 )
-from config import CLAUDE_MODEL, CLAUDE_SYSTEM_PROMPT, CLAUDE_MAX_TOKENS
+from commentary import (
+    generate_commentary,
+    answer_question,
+    TONES,
+    DEFAULT_TONE,
+)
 
 
 # ── Page config  (must be first Streamlit call) ───────────────────────────────
@@ -282,76 +287,7 @@ def _kpi_card(label: str, value: str, css_class: str = "", subtitle: str = "") -
     )
 
 
-# ── Claude commentary ─────────────────────────────────────────────────────────
-
-def _build_prompt(enriched_df: pd.DataFrame, cat_df: pd.DataFrame, period: str) -> str:
-    """
-    Construct the user-turn prompt sent to Claude.
-
-    The prompt is structured data first, question implicit — the system prompt
-    in config.py defines the analytical framing.  Keeping data and instructions
-    separate makes it easier to tune either independently.
-    """
-    material = get_material_items(enriched_df)
-
-    lines = [
-        f"Reporting period: {period}",
-        f"Total Budget: {_fmt_dollar(enriched_df['Budget'].sum())}",
-        f"Total Actual: {_fmt_dollar(enriched_df['Actual'].sum())}",
-        f"Net Variance: {_fmt_dollar(enriched_df['Actual'].sum() - enriched_df['Budget'].sum())}",
-        "",
-        "MATERIAL VARIANCES (sorted by absolute dollar impact):",
-    ]
-    for _, row in material.iterrows():
-        direction = "Favorable" if row["Favorable"] else "Unfavorable"
-        lines.append(
-            f"  • {row['Line Item']} ({row['Category']}): "
-            f"{_fmt_dollar(row['Variance ($)'], compact=True)} / "
-            f"{_fmt_pct(row['Variance (%)'])} — {direction} — {row['Severity']}"
-        )
-
-    lines += ["", "CATEGORY ROLL-UP:"]
-    for _, row in cat_df.iterrows():
-        lines.append(
-            f"  • {row['Category']}: "
-            f"Budget {_fmt_dollar(row['Budget ($)'], compact=True)}, "
-            f"Actual {_fmt_dollar(row['Actual ($)'], compact=True)}, "
-            f"Variance {_fmt_dollar(row['Variance ($)'], compact=True)} "
-            f"({_fmt_pct(row['Variance (%)'])}) — "
-            f"Dominant severity: {row['Dominant Severity']}"
-        )
-
-    return "\n".join(lines)
-
-
-def generate_commentary(
-    enriched_df: pd.DataFrame,
-    cat_df: pd.DataFrame,
-    period: str,
-    api_key: str,
-) -> str:
-    """
-    Call the Claude API and return the variance commentary as a plain string.
-
-    Uses a non-streaming call so the full response is captured in session_state
-    before rendering.  The system prompt is sourced from config.py so the
-    analytical tone can be tuned without touching UI code.
-
-    Raises
-    ------
-    anthropic.AuthenticationError   — bad API key
-    anthropic.APIConnectionError    — network issue
-    Any other anthropic exception   — surfaced to the caller
-    """
-    client  = anthropic.Anthropic(api_key=api_key)
-    prompt  = _build_prompt(enriched_df, cat_df, period)
-    message = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=CLAUDE_MAX_TOKENS,
-        system=CLAUDE_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return message.content[0].text
+# generate_commentary and answer_question are imported from commentary.py
 
 
 # ── PowerPoint export ─────────────────────────────────────────────────────────
@@ -791,6 +727,7 @@ def render_sidebar() -> dict:
         period        : str
         mat_pct       : float  (decimal, e.g. 0.05)
         mat_abs       : float  (dollars, e.g. 50000)
+        tone          : str    (one of TONES)
         api_key       : str    (empty string if not provided)
     """
     with st.sidebar:
@@ -804,6 +741,24 @@ def render_sidebar() -> dict:
         )
 
         period = st.text_input("Reporting Period", value="Q4 2024")
+
+        st.markdown("---")
+        st.markdown(
+            "<p style='font-size:0.70rem;color:#94A3B8;letter-spacing:0.06em;"
+            "text-transform:uppercase;margin-bottom:4px;'>Commentary Tone</p>",
+            unsafe_allow_html=True,
+        )
+        tone = st.radio(
+            "Commentary Tone",
+            options=TONES,
+            index=TONES.index(DEFAULT_TONE),
+            label_visibility="collapsed",
+            help=(
+                "Board Presentation: polished, strategic grouping, recommendations.\n"
+                "Internal Team Update: direct, action items, under 300 words.\n"
+                "Investor Call Prep: formal, beat/miss framing, Q&A prep."
+            ),
+        )
 
         st.markdown("---")
         st.markdown(
@@ -825,11 +780,11 @@ def render_sidebar() -> dict:
             "Anthropic API Key",
             type="password",
             placeholder="sk-ant-…  (optional)",
-            help="Required for AI commentary. Key is not stored anywhere.",
+            help="Required for AI commentary and querying. Key is not stored anywhere.",
         )
 
         # Push byline to the bottom of the sidebar
-        st.markdown("<br>" * 8, unsafe_allow_html=True)
+        st.markdown("<br>" * 6, unsafe_allow_html=True)
         st.markdown(
             "<p style='font-size:0.70rem;color:#475569;text-align:center;"
             "font-family:Calibri,sans-serif;line-height:1.6;'>"
@@ -844,8 +799,98 @@ def render_sidebar() -> dict:
         "period":        period,
         "mat_pct":       mat_pct / 100,
         "mat_abs":       mat_abs * 1_000,
+        "tone":          tone,
         "api_key":       api_key.strip() if api_key else "",
     }
+
+
+# ── Chat interface (NL querying) ──────────────────────────────────────────────
+
+def render_chat_interface(
+    enriched_df: pd.DataFrame,
+    cat_df: pd.DataFrame,
+    period: str,
+    api_key: str,
+) -> None:
+    """
+    Render a chat-style interface for natural-language variance queries.
+
+    When an API key is present, each user message is sent to Claude with the
+    full variance context and the accumulated conversation history.  Responses
+    are streamed into st.chat_message so multi-turn follow-ups work naturally.
+
+    When no API key is available, a prompt is shown directing the user to the
+    sidebar — the chat input is still rendered so the UX is consistent.
+
+    Session-state key: "chat_history" — list of {"role", "content"} dicts.
+    The history is preserved until a new file is uploaded or thresholds change.
+    """
+    st.markdown("---")
+    st.markdown(
+        "<h3 style='font-family:Calibri,sans-serif;color:#1E293B;"
+        "font-size:1.1rem;font-weight:700;margin-bottom:4px;'>💬 Ask About Your Variances</h3>",
+        unsafe_allow_html=True,
+    )
+
+    if not api_key:
+        st.info(
+            "Add your Anthropic API key in the sidebar to ask questions about your variances.",
+            icon="🔑",
+        )
+    else:
+        st.markdown(
+            "<p style='font-size:0.8rem;color:#94A3B8;font-family:Calibri,sans-serif;"
+            "margin-bottom:12px;'>"
+            "Try: \"Why did we miss revenue?\" · \"What's driving the cloud overrun?\" · "
+            "\"Summarise this for my CFO in 2 sentences\"</p>",
+            unsafe_allow_html=True,
+        )
+
+    history: list[dict] = st.session_state.get("chat_history", [])
+
+    # Render existing conversation
+    for msg in history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Chat input (always rendered; disabled path handled below)
+    if prompt := st.chat_input("Ask a question about your variances…"):
+        # Immediately render the user bubble and save to history
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        history.append({"role": "user", "content": prompt})
+
+        # Generate response
+        with st.chat_message("assistant"):
+            if not api_key:
+                reply = (
+                    "Add your Anthropic API key in the sidebar to ask questions "
+                    "about your variances."
+                )
+                st.markdown(reply)
+            else:
+                with st.spinner(""):
+                    try:
+                        reply = answer_question(
+                            enriched_df=enriched_df,
+                            cat_df=cat_df,
+                            period=period,
+                            question=prompt,
+                            chat_history=history[:-1],   # exclude the message we just appended
+                            api_key=api_key,
+                            commentary=st.session_state.get("commentary"),
+                        )
+                    except anthropic.AuthenticationError:
+                        reply = "Invalid API key — please check the key in the sidebar."
+                    except anthropic.APIConnectionError:
+                        reply = "Could not reach the Anthropic API. Check your internet connection."
+                    except Exception as exc:
+                        reply = f"Error: {exc}"
+                st.markdown(reply)
+
+        history.append({"role": "assistant", "content": reply})
+        st.session_state["chat_history"] = history
+        st.rerun()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -857,6 +902,7 @@ def main() -> None:
     period        = inputs["period"]
     mat_pct       = inputs["mat_pct"]
     mat_abs       = inputs["mat_abs"]
+    tone          = inputs["tone"]
     api_key       = inputs["api_key"]
 
     # ── State 1: no file ─────────────────────────────────────────────────────
@@ -892,6 +938,7 @@ def main() -> None:
         st.session_state["cat_df"]       = cat_df
         st.session_state["waterfall_df"] = waterfall_df
         st.session_state["commentary"]   = None   # reset on new file / threshold change
+        st.session_state["chat_history"] = []     # reset conversation on new file
 
     enriched_df  = st.session_state["enriched_df"]
     cat_df       = st.session_state["cat_df"]
@@ -905,12 +952,16 @@ def main() -> None:
     btn_col, dl_col, _ = st.columns([2, 2, 5], gap="small")
 
     with btn_col:
+        # Show which tone will be used so users understand the button
+        btn_label = f"✨ Generate  ·  {tone.split()[0]}"
         generate_clicked = st.button(
-            "💬 Generate Commentary",
+            btn_label,
             type="primary",
             use_container_width=True,
-            disabled=not bool(api_key),
-            help="Add your Anthropic API key in the sidebar to enable AI commentary.",
+            help=(
+                f"Generate {tone} commentary. "
+                "No API key? Click anyway for a rule-based version."
+            ),
         )
 
     with dl_col:
@@ -931,10 +982,20 @@ def main() -> None:
 
     # ── Commentary generation ─────────────────────────────────────────────────
     if generate_clicked:
-        with st.spinner("Claude is reviewing the variances…"):
+        spinner_msg = (
+            f"Claude is preparing {tone} commentary…"
+            if api_key else
+            f"Generating rule-based {tone} commentary…"
+        )
+        with st.spinner(spinner_msg):
             try:
-                text = generate_commentary(enriched_df, cat_df, period, api_key)
+                text = generate_commentary(
+                    enriched_df, cat_df, period,
+                    tone=tone,
+                    api_key=api_key,
+                )
                 st.session_state["commentary"] = text
+                st.session_state["chat_history"] = []   # fresh chat for new commentary
                 st.rerun()
             except anthropic.AuthenticationError:
                 st.error("Invalid API key. Double-check your Anthropic key and try again.")
@@ -943,9 +1004,10 @@ def main() -> None:
             except Exception as exc:
                 st.error(f"Commentary generation failed: {exc}")
 
-    # ── State 3: commentary ───────────────────────────────────────────────────
+    # ── State 3: commentary + chat ────────────────────────────────────────────
     if st.session_state.get("commentary"):
         render_commentary(st.session_state["commentary"])
+        render_chat_interface(enriched_df, cat_df, period, api_key)
 
 
 if __name__ == "__main__":
