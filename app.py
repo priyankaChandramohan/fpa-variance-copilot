@@ -39,14 +39,15 @@ from charts import (
 )
 from commentary import (
     generate_commentary,
-    answer_question,
+    ask_variance_question,
+    generate_projection_narrative,
     TONES,
     DEFAULT_TONE,
 )
 from projection import (
-    project_next_quarter,
-    summarize_projection,
-    generate_risk_narrative,
+    build_projection,
+    projection_summary,
+    build_projection_chart_data,
     next_quarter_label,
 )
 from charts import plot_projection
@@ -330,7 +331,7 @@ def _kpi_card(label: str, value: str, css_class: str = "", subtitle: str = "") -
     )
 
 
-# generate_commentary and answer_question are imported from commentary.py
+# generate_commentary and ask_variance_question are imported from commentary.py
 # build_presentation is imported from pptx_export.py
 
 
@@ -677,8 +678,8 @@ def render_forward_look(
         )
 
     # ── Compute projection ────────────────────────────────────────────────────
-    proj_df = project_next_quarter(enriched_df, next_q_growth_pct=growth_pct)
-    summary = summarize_projection(proj_df, period=period, next_q_label=next_q)
+    proj_df = build_projection(enriched_df, next_q_growth_pct=growth_pct)
+    summary = projection_summary(proj_df, period=period, next_q_label=next_q)
     st.session_state["projection_df"] = proj_df
 
     # ── Projection table ──────────────────────────────────────────────────────
@@ -782,7 +783,7 @@ def render_forward_look(
     # ── AI risk narrative ─────────────────────────────────────────────────────
     if api_key:
         with st.spinner(f"Generating risk narrative for {next_q}…"):
-            narrative = generate_risk_narrative(summary, api_key)
+            narrative = generate_projection_narrative(summary, api_key)
         if narrative:
             st.session_state["risk_narrative"] = narrative
             safe = (
@@ -875,7 +876,7 @@ def render_chat_interface(
             else:
                 with st.spinner(""):
                     try:
-                        reply = answer_question(
+                        reply = ask_variance_question(
                             enriched_df=enriched_df,
                             cat_df=cat_df,
                             period=period,

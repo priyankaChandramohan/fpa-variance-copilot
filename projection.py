@@ -21,35 +21,38 @@ An item is "at risk" when it is unfavorable AND its cumulative two-quarter
 variance (current + projected) exceeds a configurable threshold (default 20%
 of the two-quarter combined budget).  This surfaces items that are becoming
 structurally problematic, not just one-off misses.
+
+Public API
+----------
+build_projection(enriched_df, next_q_growth_pct, risk_threshold_pct) -> pd.DataFrame
+projection_summary(proj_df, period, next_q_label) -> dict
+build_projection_chart_data(proj_df) -> pd.DataFrame
+next_quarter_label(period) -> str
 """
 
 from __future__ import annotations
 
 import re
 
-import anthropic
 import numpy as np
 import pandas as pd
-
-from variance_engine import get_material_items
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-RISK_THRESHOLD_PCT    = 0.20   # |cumulative variance %| >= 20% → At Risk
-PROJECTION_MODEL      = "claude-sonnet-4-20250514"
-PROJECTION_MAX_TOKENS = 180    # 2–3 sentences only
+RISK_THRESHOLD_PCT = 0.20   # |cumulative variance %| >= 20% → At Risk
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def project_next_quarter(
+def build_projection(
     enriched_df: pd.DataFrame,
     next_q_growth_pct: float = 0.0,
     risk_threshold_pct: float = RISK_THRESHOLD_PCT,
 ) -> pd.DataFrame:
     """
-    Project next-quarter actuals by assuming material variances persist.
+    Project next-quarter actuals by assuming material variances persist at
+    the same dollar run-rate.
 
     Parameters
     ----------
@@ -87,10 +90,8 @@ def project_next_quarter(
     Notes
     -----
     The dollar run-rate assumption (same $ variance, not same %) is conservative
-    for revenue misses (they should be expressed as $) but may overstate cost
-    risks when next-quarter budget is materially different.  A growth-adjusted
-    variant (same %) is trivially derivable but adds explanation overhead in
-    presentations — the current default keeps the story clean.
+    for revenue misses and may overstate cost risks when next-quarter budget
+    differs materially.  The current default keeps the story clean and auditable.
     """
     df = enriched_df.copy()
 
@@ -147,48 +148,48 @@ def project_next_quarter(
     return df[[c for c in out_cols if c in df.columns]].reset_index(drop=True)
 
 
-def summarize_projection(
-    projection_df: pd.DataFrame,
+def projection_summary(
+    proj_df: pd.DataFrame,
     period: str,
     next_q_label: str = "Next Quarter",
 ) -> dict:
     """
-    Compute summary statistics for the projection summary card.
+    Aggregate key statistics from a projection DataFrame.
 
     Parameters
     ----------
-    projection_df : output of project_next_quarter()
-    period        : current reporting period label, e.g. "Q4 2024"
-    next_q_label  : projected period label, e.g. "Q1 2025"
+    proj_df      : output of build_projection()
+    period       : current reporting period label, e.g. "Q4 2024"
+    next_q_label : projected period label, e.g. "Q1 2025"
 
     Returns
     -------
     dict with keys:
-        projected_net_budget     : float
-        projected_net_variance   : float (sum of all Projected Variance ($))
+        projected_net_budget      : float
+        projected_net_variance    : float (sum of all Projected Variance ($))
         projected_net_variance_pct: float
-        n_at_risk                : int
-        at_risk_items            : list[str]
-        worst_item               : str   — unfavorable item with largest |Projected Variance ($)|
-        worst_variance           : float
-        improving_items          : list[str] — favorable items with non-zero projected variance
-        period                   : str
-        next_q_label             : str
+        n_at_risk                 : int
+        at_risk_items             : list[str]
+        worst_item                : str   — unfavorable item with largest |Projected Variance ($)|
+        worst_variance            : float
+        improving_items           : list[str] — favorable items with non-zero projected variance
+        period                    : str
+        next_q_label              : str
     """
-    total_proj_budget   = projection_df["Next Q Budget"].sum()
-    total_proj_variance = projection_df["Projected Variance ($)"].sum()
+    total_proj_budget   = proj_df["Next Q Budget"].sum()
+    total_proj_variance = proj_df["Projected Variance ($)"].sum()
     proj_pct = (
         total_proj_variance / abs(total_proj_budget) * 100
         if total_proj_budget else 0.0
     )
 
-    at_risk_df   = projection_df[projection_df["At Risk"]]
-    improving_df = projection_df[
-        projection_df["Favorable"] & (projection_df["Projected Variance ($)"] != 0)
+    at_risk_df   = proj_df[proj_df["At Risk"]]
+    improving_df = proj_df[
+        proj_df["Favorable"] & (proj_df["Projected Variance ($)"] != 0)
     ]
 
-    unfav_nonzero = projection_df[
-        ~projection_df["Favorable"] & (projection_df["Projected Variance ($)"] != 0)
+    unfav_nonzero = proj_df[
+        ~proj_df["Favorable"] & (proj_df["Projected Variance ($)"] != 0)
     ]
     if len(unfav_nonzero) > 0:
         worst_row     = unfav_nonzero.loc[unfav_nonzero["Projected Variance ($)"].abs().idxmax()]
@@ -199,8 +200,8 @@ def summarize_projection(
         worst_variance = 0.0
 
     return {
-        "projected_net_budget":      total_proj_budget,
-        "projected_net_variance":    total_proj_variance,
+        "projected_net_budget":       total_proj_budget,
+        "projected_net_variance":     total_proj_variance,
         "projected_net_variance_pct": proj_pct,
         "n_at_risk":                  len(at_risk_df),
         "at_risk_items":              at_risk_df["Line Item"].tolist(),
@@ -212,59 +213,38 @@ def summarize_projection(
     }
 
 
-def generate_risk_narrative(
-    summary: dict,
-    api_key: str,
-) -> str | None:
+def build_projection_chart_data(proj_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Generate a 2–3 sentence AI risk narrative for the forward projection.
+    Return a chart-ready slice of a projection DataFrame.
 
-    Designed to be a fast, focused call (max_tokens=180) — this should feel
-    like a one-line analyst note, not a full commentary section.
+    Filters to material items only, selects the columns the projection chart
+    needs, and sorts by absolute projected variance descending so the largest
+    exposures appear at the top of the chart.
 
     Parameters
     ----------
-    summary : dict from summarize_projection()
-    api_key : Anthropic API key; returns None if empty
+    proj_df : output of build_projection()
 
     Returns
     -------
-    str | None — narrative text, or None if no key / API error
+    pd.DataFrame with columns:
+        Line Item, Category, Favorable,
+        Variance ($), Variance (%),
+        Projected Variance ($), Projected Variance (%),
+        Cumulative Variance (%), At Risk
     """
-    if not api_key:
-        return None
+    material = proj_df[proj_df["Material"]].copy()
+    material["_abs_proj"] = material["Projected Variance ($)"].abs()
+    material.sort_values("_abs_proj", ascending=False, inplace=True)
+    material.drop(columns=["_abs_proj"], inplace=True)
 
-    at_risk_list = ", ".join(summary["at_risk_items"]) or "none"
-    proj_var     = summary["projected_net_variance"]
-    sign         = "+" if proj_var >= 0 else ""
-
-    prompt = (
-        f"Forward projection from {summary['period']} to {summary['next_q_label']}:\n"
-        f"- Projected net variance: {sign}{_d(proj_var, compact=True)} "
-        f"({summary['projected_net_variance_pct']:+.1f}% of next-quarter budget)\n"
-        f"- Items at cumulative risk (>20% threshold): {at_risk_list}\n"
-        f"- Largest adverse projected item: {summary['worst_item']} "
-        f"({_d(summary['worst_variance'], compact=True, sign=True)})\n"
-        f"- Items trending favorably: {', '.join(summary['improving_items'][:3]) or 'none'}\n\n"
-        "Write exactly 2–3 sentences of forward-looking risk commentary for a CFO. "
-        "Lead with the most important number, identify the primary risk driver, "
-        "and end with one specific mitigation action. No preamble."
-    )
-
-    try:
-        client   = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=PROJECTION_MODEL,
-            max_tokens=PROJECTION_MAX_TOKENS,
-            system=(
-                "You are a senior FP&A analyst writing a concise risk note. "
-                "Be direct. Cite specific dollar amounts. No filler phrases."
-            ),
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.content[0].text
-    except Exception:
-        return None
+    cols = [
+        "Line Item", "Category", "Favorable",
+        "Variance ($)", "Variance (%)",
+        "Projected Variance ($)", "Projected Variance (%)",
+        "Cumulative Variance (%)", "At Risk",
+    ]
+    return material[[c for c in cols if c in material.columns]].reset_index(drop=True)
 
 
 def next_quarter_label(period: str) -> str:

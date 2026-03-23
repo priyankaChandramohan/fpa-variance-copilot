@@ -40,6 +40,10 @@ DEFAULT_TONE = "Board Presentation"
 # Max chat turns kept in the context window for multi-turn queries
 _MAX_HISTORY_TURNS = 10
 
+# Projection narrative settings (short focused call — 2-3 sentences only)
+_PROJECTION_MODEL      = "claude-sonnet-4-20250514"
+_PROJECTION_MAX_TOKENS = 180
+
 # ── Tone-specific system prompts ──────────────────────────────────────────────
 
 _SYSTEM_PROMPTS: dict[str, str] = {
@@ -145,7 +149,7 @@ def generate_commentary(
     return _rule_based(enriched_df, cat_df, period, tone)
 
 
-def answer_question(
+def ask_variance_question(
     enriched_df: pd.DataFrame,
     cat_df: pd.DataFrame,
     period: str,
@@ -197,6 +201,62 @@ def answer_question(
         messages=messages,
     )
     return response.content[0].text
+
+
+def generate_projection_narrative(
+    summary: dict,
+    api_key: str,
+) -> str | None:
+    """
+    Generate a 2–3 sentence AI risk narrative for the forward projection.
+
+    Designed as a fast, focused call (max_tokens=180) — this should feel like
+    a one-line analyst note appended to the Forward Look section, not a full
+    commentary block.
+
+    Parameters
+    ----------
+    summary : dict from projection.projection_summary()
+    api_key : Anthropic API key; returns None if empty or on API error
+
+    Returns
+    -------
+    str | None — narrative text, or None if no key / API error
+    """
+    if not api_key:
+        return None
+
+    at_risk_list = ", ".join(summary["at_risk_items"]) or "none"
+    proj_var     = summary["projected_net_variance"]
+    sign         = "+" if proj_var >= 0 else ""
+
+    prompt = (
+        f"Forward projection from {summary['period']} to {summary['next_q_label']}:\n"
+        f"- Projected net variance: {sign}{_d(proj_var, compact=True)} "
+        f"({summary['projected_net_variance_pct']:+.1f}% of next-quarter budget)\n"
+        f"- Items at cumulative risk (>20% threshold): {at_risk_list}\n"
+        f"- Largest adverse projected item: {summary['worst_item']} "
+        f"({_d(summary['worst_variance'], compact=True, sign=True)})\n"
+        f"- Items trending favorably: {', '.join(summary['improving_items'][:3]) or 'none'}\n\n"
+        "Write exactly 2–3 sentences of forward-looking risk commentary for a CFO. "
+        "Lead with the most important number, identify the primary risk driver, "
+        "and end with one specific mitigation action. No preamble."
+    )
+
+    try:
+        client   = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=_PROJECTION_MODEL,
+            max_tokens=_PROJECTION_MAX_TOKENS,
+            system=(
+                "You are a senior FP&A analyst writing a concise risk note. "
+                "Be direct. Cite specific dollar amounts. No filler phrases."
+            ),
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+    except Exception:
+        return None
 
 
 # ── Data context builder (shared by commentary + query prompts) ────────────────

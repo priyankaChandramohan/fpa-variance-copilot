@@ -33,7 +33,7 @@ from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 
 from charts import plot_projection, plot_waterfall
-from projection import next_quarter_label, project_next_quarter, summarize_projection
+from projection import next_quarter_label, build_projection, projection_summary
 from variance_engine import get_material_items
 
 
@@ -97,7 +97,7 @@ def build_presentation(
                      "Investor Call Prep")
     commentary     : commentary text to include on Slide 5; None = slide is still
                      rendered with a placeholder message
-    projection_df  : output of project_next_quarter(); if None, computed with
+    projection_df  : output of build_projection(); if None, computed with
                      default parameters (0% budget growth)
     risk_narrative : 2-3 sentence AI risk note for Slide 6; None = omitted
 
@@ -111,7 +111,7 @@ def build_presentation(
 
     # Compute projection if not provided
     if projection_df is None:
-        projection_df = project_next_quarter(enriched_df)
+        projection_df = build_projection(enriched_df)
 
     _slide_title(prs, enriched_df, period, tone)
     _slide_kpis(prs, enriched_df, period)
@@ -446,7 +446,7 @@ def _slide_forward_look(
     sl     = _add_slide(prs)
     _slide_title_bar(sl, f"Forward Look   ·   {period}  →  {next_q}")
 
-    summary = summarize_projection(projection_df, period=period, next_q_label=next_q)
+    summary = projection_summary(projection_df, period=period, next_q_label=next_q)
 
     # ── Projection table (left zone, width ≈ 8.5") ───────────────────────────
     material_proj = projection_df[projection_df["Material"]].head(10)
