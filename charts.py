@@ -372,158 +372,211 @@ def plot_severity_donut(
 
 
 # ---------------------------------------------------------------------------
-# 4. Projection chart — placeholder for predictive feature
+# 4. Projection chart — current vs. Q+1 run-rate grouped bar chart
 # ---------------------------------------------------------------------------
 
 def plot_projection(
-    historical_df: pd.DataFrame | None = None,
     projection_df: pd.DataFrame | None = None,
-    metric: str = "Revenue",
-    title: str | None = None,
+    title: str = "Q+1 Variance Projection — Run-Rate Scenario",
 ) -> go.Figure:
     """
-    Line chart showing historical actuals with a dashed projection line and
-    shaded confidence band for the next quarter.
+    Horizontal grouped bar chart comparing current-period variance (solid bars)
+    against the projected next-quarter variance (hatched bars) for all material
+    line items.
 
-    Current state: PLACEHOLDER.
-    The function signature and layout are fully defined so the Streamlit UI can
-    call this function today and receive a chart with a "coming soon" message.
-    The projection logic will be wired in a later sprint.
+    Visual encoding
+    ---------------
+    Solid bars     — current-period variance (what happened)
+    Hatched bars   — Q+1 projected variance (if trend persists)
+    Teal           — favorable items
+    Red            — unfavorable items not at cumulative risk
+    Dark red       — at-risk items (cumulative two-quarter variance > threshold)
+    ⚠️ prefix      — y-axis label prefix for every at-risk item
+
+    Sort order: at-risk items appear at the top of the chart, then remaining
+    items by absolute projected variance descending.  Plotly horizontal bar
+    charts render the last list item at the top, so the list is built
+    bottom-to-top (smallest → largest within each risk group).
 
     Parameters
     ----------
-    historical_df : pd.DataFrame | None
-        One row per period with columns: Period (str), Actual (float).
-        When None a sample trace is rendered so the chart is not blank.
     projection_df : pd.DataFrame | None
-        One row per projected period with columns:
-            Period     (str)   — period label, e.g. "Q1 2025"
-            Projected  (float) — point estimate
-            Lower      (float) — lower confidence bound
-            Upper      (float) — upper confidence bound
-        When None the projection band is omitted.
-    metric : str
-        The metric being projected (used in axis label and hover).
-    title : str | None
-        Chart title.  Defaults to f"{metric} — Actuals & Q+1 Projection".
+        Output of projection.project_next_quarter().  When None a placeholder
+        figure is returned.
+    title : str
+        Chart title.
 
     Returns
     -------
     go.Figure
-        A fully styled figure.  If both inputs are None a placeholder figure
-        is returned with an annotation explaining the feature is pending.
-
-    Future wiring notes
-    -------------------
-    - historical_df will be built from compute_variances() output, grouped by Period.
-    - projection_df will be produced by a forecasting module (linear trend or
-      Prophet) and passed in from the Streamlit sidebar.
-    - The confidence band is rendered as a filled area trace between Lower and Upper.
     """
-    _title = title or f"{metric} — Actuals & Q+1 Projection"
-
-    # --- Placeholder path: neither input supplied ---
-    if historical_df is None and projection_df is None:
+    # ── Placeholder ───────────────────────────────────────────────────────────
+    if projection_df is None or len(projection_df) == 0:
         fig = go.Figure()
         _apply_layout(
             fig,
             title=dict(
-                text=_title,
+                text=title,
                 font=dict(family=_FONT_FAMILY, size=16, color="#1E293B"),
-                x=0.02,
-                xanchor="left",
+                x=0.02, xanchor="left",
             ),
             xaxis=dict(**_AXIS_STYLE, showgrid=False, visible=False),
             yaxis=dict(**_AXIS_STYLE, visible=False),
             margin=dict(l=32, r=32, t=64, b=32),
         )
         fig.add_annotation(
-            text=(
-                "<b>Projection feature coming soon</b><br>"
-                "<span style='font-size:12px;color:#64748B'>"
-                "Multi-period data required. Upload actuals for 3+ quarters to unlock.</span>"
-            ),
-            x=0.5, y=0.5,
-            showarrow=False,
-            font=dict(family=_FONT_FAMILY, size=15, color="#334155"),
-            align="center",
-            xref="paper",
-            yref="paper",
-            bgcolor="#F8FAFC",
-            bordercolor="#E2E8F0",
-            borderwidth=1,
-            borderpad=16,
+            text="<b>No projection data available.</b>",
+            x=0.5, y=0.5, showarrow=False,
+            font=dict(family=_FONT_FAMILY, size=14, color="#64748B"),
+            xref="paper", yref="paper",
         )
         return fig
 
-    # --- Live path: render actuals + optional projection band ---
+    # ── Filter and sort material items ────────────────────────────────────────
+    df = projection_df[projection_df["Material"]].copy()
+
+    if len(df) == 0:
+        return plot_projection(None, title)   # fallback to placeholder
+
+    # Cap at 12 items for readability; within-group sort is bottom-to-top
+    # (ascending=True → smallest abs value at index 0 → bottom of chart)
+    df["_abs_proj"] = df["Projected Variance ($)"].abs()
+
+    safe_df = (
+        df[~df["At Risk"]]
+        .sort_values("_abs_proj", ascending=True)
+        .head(12)
+    )
+    risk_df = (
+        df[df["At Risk"]]
+        .sort_values("_abs_proj", ascending=True)   # largest at top within risk group
+    )
+    # Stack: safe items at bottom, at-risk at top
+    df_sorted = pd.concat([safe_df, risk_df]).reset_index(drop=True)
+    df_sorted.drop(columns=["_abs_proj"], inplace=True)
+
+    # Y-axis labels — prepend ⚠️ for at-risk items
+    labels = [
+        f"⚠️  {row['Line Item']}" if row["At Risk"] else row["Line Item"]
+        for _, row in df_sorted.iterrows()
+    ]
+
+    current_vars   = df_sorted["Variance ($)"].tolist()
+    projected_vars = df_sorted["Projected Variance ($)"].tolist()
+
+    # ── Color arrays ──────────────────────────────────────────────────────────
+    # Current bars: teal (favorable) / red (unfavorable) / dark-red (at-risk)
+    current_colors = [
+        "#0D9488" if row["Favorable"] else
+        ("#9F1239" if row["At Risk"] else "#DC2626")
+        for _, row in df_sorted.iterrows()
+    ]
+    # Projected bars: lighter teal / lighter red / dark-red for at-risk
+    projected_colors = [
+        "#5EEAD4" if row["Favorable"] else
+        ("#9F1239" if row["At Risk"] else "#FCA5A5")
+        for _, row in df_sorted.iterrows()
+    ]
+
+    # ── Build traces ──────────────────────────────────────────────────────────
     fig = go.Figure()
 
-    # Historical actuals line
-    if historical_df is not None:
-        fig.add_trace(go.Scatter(
-            x=historical_df["Period"],
-            y=historical_df["Actual"],
-            mode="lines+markers",
-            name="Actual",
-            line=dict(color="#0D9488", width=2.5),
-            marker=dict(size=7, color="#0D9488", line=dict(width=2, color="#FFFFFF")),
-            hovertemplate=f"<b>%{{x}}</b><br>{metric}: %{{y:$,.0f}}<extra></extra>",
-        ))
+    # Trace 1: Current period — solid bars
+    fig.add_trace(go.Bar(
+        name="Current Period",
+        orientation="h",
+        y=labels,
+        x=current_vars,
+        marker=dict(
+            color=current_colors,
+            line=dict(width=0),
+        ),
+        text=[_fmt_currency(v, show_sign=True) for v in current_vars],
+        textposition="outside",
+        textfont=dict(family=_FONT_FAMILY, size=10, color="#475569"),
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "Current variance: %{text}<extra>Current</extra>"
+        ),
+        cliponaxis=False,
+    ))
 
-    # Projection band (confidence interval as filled area)
-    if projection_df is not None:
-        # Upper bound (invisible line, forms top of shaded area)
-        fig.add_trace(go.Scatter(
-            x=projection_df["Period"],
-            y=projection_df["Upper"],
-            mode="lines",
+    # Trace 2: Q+1 projected — hatched / patterned bars
+    fig.add_trace(go.Bar(
+        name="Q+1 Projected (run-rate)",
+        orientation="h",
+        y=labels,
+        x=projected_vars,
+        marker=dict(
+            color=projected_colors,
             line=dict(width=0),
-            showlegend=False,
-            hoverinfo="skip",
-        ))
-        # Lower bound — fill to previous (upper) trace
-        fig.add_trace(go.Scatter(
-            x=projection_df["Period"],
-            y=projection_df["Lower"],
-            mode="lines",
-            line=dict(width=0),
-            fill="tonexty",
-            fillcolor="rgba(13, 148, 136, 0.12)",   # teal, 12% opacity
-            name="Confidence band",
-            hoverinfo="skip",
-            showlegend=True,
-        ))
-        # Point estimate — dashed line
-        fig.add_trace(go.Scatter(
-            x=projection_df["Period"],
-            y=projection_df["Projected"],
-            mode="lines+markers",
-            name="Projection",
-            line=dict(color="#0D9488", width=2, dash="dash"),
-            marker=dict(size=7, color="#0D9488", symbol="circle-open",
-                        line=dict(width=2, color="#0D9488")),
-            hovertemplate=f"<b>%{{x}}</b><br>Projected {metric}: %{{y:$,.0f}}<extra></extra>",
-        ))
+            pattern=dict(
+                shape="/",
+                solidity=0.35,
+                fgcolor="rgba(255,255,255,0.65)",
+            ),
+        ),
+        text=[_fmt_currency(v, show_sign=True) for v in projected_vars],
+        textposition="outside",
+        textfont=dict(family=_FONT_FAMILY, size=10, color="#475569"),
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "Q+1 projected: %{text}<extra>Projected</extra>"
+        ),
+        cliponaxis=False,
+    ))
+
+    # ── Legend annotation for color key ──────────────────────────────────────
+    n_at_risk = int(df_sorted["At Risk"].sum())
+    if n_at_risk > 0:
+        fig.add_annotation(
+            text=f"<b style='color:#9F1239'>■</b> At-risk items: {n_at_risk} "
+                 f"(cumulative variance &gt;20% of two-quarter budget)",
+            x=0.01, y=1.06,
+            xref="paper", yref="paper",
+            showarrow=False,
+            font=dict(family=_FONT_FAMILY, size=11, color="#64748B"),
+            xanchor="left",
+        )
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    # Left margin needs to be wide enough for item labels + ⚠️ prefix
+    max_label_len = max(len(l) for l in labels)
+    left_margin   = min(max(180, max_label_len * 7), 340)
 
     _apply_layout(
         fig,
         title=dict(
-            text=_title,
+            text=title,
             font=dict(family=_FONT_FAMILY, size=16, color="#1E293B"),
-            x=0.02,
-            xanchor="left",
+            x=0.02, xanchor="left",
         ),
-        xaxis=dict(**_AXIS_STYLE, showgrid=False, title="Period"),
-        yaxis=dict(**_AXIS_STYLE, tickformat="$,.0f", title=f"{metric} (USD)"),
+        barmode="group",
+        bargap=0.28,
+        bargroupgap=0.08,
+        xaxis={
+            **_AXIS_STYLE,
+            "zeroline": True,          # override _AXIS_STYLE's zeroline=False
+            "zerolinecolor": "#CBD5E1",
+            "zerolinewidth": 1.5,
+            "tickformat": "$,.0f",
+            "title": "Variance Amount (USD)",
+        },
+        yaxis={
+            **_AXIS_STYLE,
+            "showgrid": False,
+            "tickfont": dict(family=_FONT_FAMILY, size=11, color="#1E293B"),
+        },
         legend=dict(
             orientation="h",
             yanchor="bottom",
             y=1.02,
             xanchor="right",
             x=1,
+            font=dict(size=11),
         ),
-        margin=dict(l=72, r=32, t=72, b=56),
+        margin=dict(l=left_margin, r=140, t=72, b=48),
+        height=max(360, len(df_sorted) * 52 + 120),
     )
 
     return fig

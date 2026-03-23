@@ -47,6 +47,13 @@ from commentary import (
     TONES,
     DEFAULT_TONE,
 )
+from projection import (
+    project_next_quarter,
+    summarize_projection,
+    generate_risk_narrative,
+    next_quarter_label,
+)
+from charts import plot_projection
 
 
 # ── Page config  (must be first Streamlit call) ───────────────────────────────
@@ -210,6 +217,46 @@ html, body, [class*="css"], .stMarkdown {
     font-family: 'Calibri', 'Segoe UI', Arial, sans-serif;
 }
 h1, h2, h3 { color: #1E293B; }
+
+/* ─── Projection summary card ─────────────────────────────────────── */
+.projection-summary {
+    background: #FFFBEB;
+    border: 1px solid #FDE68A;
+    border-left: 4px solid #D97706;
+    border-radius: 0 8px 8px 0;
+    padding: 18px 24px;
+    font-family: 'Calibri', 'Segoe UI', sans-serif;
+    font-size: 0.92rem;
+    color: #334155;
+    line-height: 1.7;
+}
+.projection-summary .proj-headline {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #1E293B;
+    margin-bottom: 4px;
+}
+.projection-summary .proj-risk {
+    color: #DC2626;
+    font-weight: 600;
+}
+.projection-summary .proj-ok {
+    color: #0D9488;
+    font-weight: 600;
+}
+
+/* ─── Risk narrative box ───────────────────────────────────────────── */
+.risk-narrative-box {
+    background: #FFF1F2;
+    border: 1px solid #FECDD3;
+    border-left: 4px solid #DC2626;
+    border-radius: 0 8px 8px 0;
+    padding: 16px 22px;
+    font-family: 'Calibri', 'Segoe UI', sans-serif;
+    font-size: 0.9rem;
+    color: #334155;
+    line-height: 1.7;
+}
 
 /* ─── Primary button colour override ─────────────────────────────── */
 .stButton [data-testid="baseButton-primary"] {
@@ -652,15 +699,17 @@ def render_analysis(
     cat_df: pd.DataFrame,
     waterfall_df: pd.DataFrame,
     period: str,
+    api_key: str = "",
 ) -> None:
-    """Render KPI cards and the four-tab chart / table area."""
+    """Render KPI cards and the five-tab chart / table area."""
     render_kpi_cards(enriched_df, period)
 
-    tab_wf, tab_cat, tab_sev, tab_tbl = st.tabs([
+    tab_wf, tab_cat, tab_sev, tab_tbl, tab_fwd = st.tabs([
         "📉  Waterfall",
         "📊  By Category",
         "🔴  Severity",
         "📋  Data Table",
+        "📈  Forward Look",
     ])
 
     with tab_wf:
@@ -691,6 +740,9 @@ def render_analysis(
 
     with tab_tbl:
         render_data_table(enriched_df)
+
+    with tab_fwd:
+        render_forward_look(enriched_df, period, api_key)
 
 
 # ── State 3: Commentary section ───────────────────────────────────────────────
@@ -802,6 +854,183 @@ def render_sidebar() -> dict:
         "tone":          tone,
         "api_key":       api_key.strip() if api_key else "",
     }
+
+
+# ── Forward Look tab ─────────────────────────────────────────────────────────
+
+def render_forward_look(
+    enriched_df: pd.DataFrame,
+    period: str,
+    api_key: str,
+) -> None:
+    """
+    Render the Forward Look tab content: projection table, summary card,
+    variance chart, and optional AI risk narrative.
+
+    Layout
+    ------
+    [Budget growth assumption input]
+    [Projection table — material items with risk flags]
+    [Summary card — headline projection statement]
+    [Grouped bar chart — current vs. projected variances]
+    [AI risk narrative — 2-3 sentences, shown when API key is present]
+    """
+    next_q = next_quarter_label(period)
+
+    # ── Controls row ──────────────────────────────────────────────────────────
+    ctrl_col, info_col = st.columns([2, 5], gap="large")
+    with ctrl_col:
+        growth_pct = st.number_input(
+            f"Q+1 Budget Growth (%)",
+            min_value=-20.0,
+            max_value=50.0,
+            value=0.0,
+            step=1.0,
+            format="%.1f",
+            help=(
+                f"Scales every line item's {next_q} budget by this percentage. "
+                "0 = same budget as current quarter."
+            ),
+        )
+    with info_col:
+        st.markdown(
+            "<p style='font-size:0.82rem;color:#64748B;font-family:Calibri,sans-serif;"
+            "padding-top:28px;'>"
+            "<strong>Method:</strong> Material variances are assumed to persist "
+            "at the same dollar run-rate next quarter. Non-material items are assumed "
+            "to normalise. <strong>At Risk</strong> = unfavorable and cumulative "
+            "two-quarter variance exceeds 20% of combined budget.</p>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Compute projection ────────────────────────────────────────────────────
+    proj_df = project_next_quarter(enriched_df, next_q_growth_pct=growth_pct)
+    summary = summarize_projection(proj_df, period=period, next_q_label=next_q)
+
+    # ── Projection table ──────────────────────────────────────────────────────
+    material_proj = proj_df[proj_df["Material"]].copy()
+
+    # Build display DataFrame
+    display = pd.DataFrame({
+        "Line Item":          material_proj["Line Item"],
+        "Category":           material_proj["Category"],
+        "Current Var ($)":    material_proj["Variance ($)"],
+        "Current Var (%)":    material_proj["Variance (%)"],
+        f"{next_q} Proj ($)": material_proj["Projected Variance ($)"],
+        f"{next_q} Proj (%)": material_proj["Projected Variance (%)"],
+        "Cumulative (%)":     material_proj["Cumulative Variance (%)"],
+        "Risk Flag":          material_proj.apply(
+            lambda r: "⚠️  At Risk" if r["At Risk"] else "—", axis=1
+        ),
+    }).reset_index(drop=True)
+
+    def _style_proj_row(row):
+        """Red text for at-risk rows, teal for favorable, default otherwise."""
+        at_risk = display.loc[row.name, "Risk Flag"] != "—"
+        favorable = material_proj.iloc[row.name]["Favorable"]
+        if at_risk:
+            return [
+                "color:#9F1239;font-weight:600;" if c == "Risk Flag"
+                else "color:#DC2626;"
+                for c in row.index
+            ]
+        if favorable:
+            return ["color:#0D9488;" if c != "Category" else "" for c in row.index]
+        return [""] * len(row)
+
+    styled = display.style.apply(_style_proj_row, axis=1)
+
+    st.markdown(
+        "<p style='font-size:0.78rem;color:#64748B;font-family:Calibri,sans-serif;"
+        "margin-bottom:4px;'>Material line items only. Run-rate assumption: "
+        f"same dollar variance recurs in {next_q}.</p>",
+        unsafe_allow_html=True,
+    )
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        column_config={
+            "Current Var ($)":    st.column_config.NumberColumn(format="$%d"),
+            "Current Var (%)":    st.column_config.NumberColumn(format="%.1f%%"),
+            f"{next_q} Proj ($)": st.column_config.NumberColumn(format="$%d"),
+            f"{next_q} Proj (%)": st.column_config.NumberColumn(format="%.1f%%"),
+            "Cumulative (%)":     st.column_config.NumberColumn(format="%.1f%%"),
+        },
+        hide_index=True,
+        height=min(420, (len(material_proj) + 1) * 36 + 12),
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Summary card ──────────────────────────────────────────────────────────
+    proj_var  = summary["projected_net_variance"]
+    proj_pct  = summary["projected_net_variance_pct"]
+    n_risk    = summary["n_at_risk"]
+    sign      = "+" if proj_var >= 0 else ""
+    direction = "favorable" if proj_var >= 0 else "unfavorable"
+    risk_html = (
+        f'<span class="proj-risk">{n_risk} at-risk item{"s" if n_risk != 1 else ""}</span>'
+        if n_risk > 0 else
+        '<span class="proj-ok">no items at cumulative risk</span>'
+    )
+
+    worst_html = ""
+    if summary["worst_item"] != "None" and summary["worst_item"]:
+        worst_html = (
+            f" Largest exposure: <strong>{summary['worst_item']}</strong> "
+            f"({_fmt_dollar(summary['worst_variance'], compact=True)})."
+        )
+
+    st.markdown(
+        f'<div class="projection-summary">'
+        f'<div class="proj-headline">'
+        f'If current trends hold, {next_q} projects a net variance of '
+        f'<strong>{sign}{_fmt_dollar(proj_var, compact=True)}</strong> '
+        f'({sign}{proj_pct:.1f}%) — {direction}.'
+        f'</div>'
+        f'The model flags {risk_html} where cumulative two-quarter exposure '
+        f'exceeds the 20% threshold.{worst_html}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Chart ─────────────────────────────────────────────────────────────────
+    st.plotly_chart(
+        plot_projection(
+            proj_df,
+            title=f"{period} → {next_q}  ·  Variance Run-Rate Projection",
+        ),
+        use_container_width=True,
+    )
+
+    # ── AI risk narrative ─────────────────────────────────────────────────────
+    if api_key:
+        with st.spinner(f"Generating risk narrative for {next_q}…"):
+            narrative = generate_risk_narrative(summary, api_key)
+        if narrative:
+            safe = (
+                narrative
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\n", "<br>")
+            )
+            st.markdown(
+                "<p style='font-size:0.78rem;color:#64748B;font-family:Calibri,sans-serif;"
+                "margin-bottom:4px;'>AI Risk Assessment</p>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div class="risk-narrative-box">{safe}</div>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info(
+            "Add your Anthropic API key in the sidebar to generate an AI risk narrative.",
+            icon="🔑",
+        )
 
 
 # ── Chat interface (NL querying) ──────────────────────────────────────────────
@@ -945,7 +1174,7 @@ def main() -> None:
     waterfall_df = st.session_state["waterfall_df"]
 
     # ── State 2: analysis ─────────────────────────────────────────────────────
-    render_analysis(enriched_df, cat_df, waterfall_df, period)
+    render_analysis(enriched_df, cat_df, waterfall_df, period, api_key=api_key)
 
     # ── Action row ────────────────────────────────────────────────────────────
     st.markdown("---")
