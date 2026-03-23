@@ -4,7 +4,7 @@
 
 Most variance tools show you the numbers. This one tells you what they mean, who needs to hear it, and what happens next quarter if nothing changes.
 
-<!-- ![Dashboard](screenshots/dashboard.png) -->
+![Dashboard](screenshots/dashboard.png)
 
 ---
 
